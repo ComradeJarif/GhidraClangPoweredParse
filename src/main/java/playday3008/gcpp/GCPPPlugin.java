@@ -281,72 +281,68 @@ public class GCPPPlugin extends ProgramPlugin
      * @return diagnostic messages from clang
      * @throws ParseException if clang parsing fails
      */
-    public String parseWithClang(String[] filenames, String[] includePaths, String options,
-                                 DataTypeManager dtMgr, String languageId, String compilerSpec,
-                                 DataTypeManager[] openArchives, TaskMonitor monitor)
-        throws ParseException
+public String parseWithClang(String[] filenames, String[] includePaths, String options,
+                             DataTypeManager dtMgr, String languageId, String compilerSpec,
+                             DataTypeManager[] openArchives, TaskMonitor monitor)
+    throws ParseException
+{
+    TypePool typePool = new TypePool(openArchives);
+    int transaction = dtMgr.startTransaction("Clang Parse YRPP");
+    boolean commit = false;
+    
+    try
     {
-        TypePool typePool = new TypePool(openArchives);
-        try
+        // Phase 1: Parse with clang
+        monitor.setMessage("Parsing " + filenames.length + " source file(s) with clang...");
+        SourceParser parser = new SourceParser();
+
+        List<String> diagnostics = parser.parseFiles(typePool, filenames, includePaths, options, languageId, compilerSpec);
+
+        // Phase 2: Resolve type dependencies
+        monitor.setMessage("Resolving type dependencies...");
+        TypePool.ResolutionResult result = typePool.resolve();
+
+        // Phase 3: Commit resolved types to the target DTM
+        List<DataType> dataTypes = result.getDataTypes();
+        monitor.setMessage("Committing " + dataTypes.size() + " data types...");
+        monitor.setMaximum(dataTypes.size());
+        monitor.setProgress(0);
+
+        int count = 0;
+        for (DataType t : dataTypes)
         {
-            // Phase 1: Parse with clang
-            monitor.setMessage("Parsing " + filenames.length + " source file(s) with clang...");
-            SourceParser parser = new SourceParser();
-
-            List<String> diagnostics = parser.parseFiles(typePool, filenames, includePaths, options, languageId, compilerSpec);
-
-            // Phase 2: Resolve type dependencies
-            monitor.setMessage("Resolving type dependencies...");
-            TypePool.ResolutionResult result = typePool.resolve();
-
-            // Phase 3: Commit resolved types to the target DTM
-            List<DataType> dataTypes = result.getDataTypes();
-            monitor.setMessage("Committing " + dataTypes.size() + " data types...");
-            monitor.setMaximum(dataTypes.size());
-            monitor.setProgress(0);
-
-            int transaction = dtMgr.startTransaction("Add clang-parsed data types");
+            monitor.setProgress(++count);
+            monitor.setMessage("Adding: " + t.getName());
             try
             {
-                int count = 0;
-                for (DataType t : dataTypes)
-                {
-                    monitor.setProgress(++count);
-                    monitor.setMessage("Adding: " + t.getName());
-                    try
-                    {
-                        dtMgr.addDataType(t, DataTypeConflictHandler.REPLACE_HANDLER);
-                    }
-                    catch (Exception e)
-                    {
-                        LOGGER.warn("Failed to add type: " + t.getName(), e);
-                    }
-                }
+                dtMgr.addDataType(t, DataTypeConflictHandler.REPLACE_HANDLER);
             }
-            finally
+            catch (Exception e)
             {
-                dtMgr.endTransaction(transaction, true);
+                LOGGER.warn("Failed to add type: " + t.getName(), e);
             }
-
-            // Build result message with diagnostics and any unresolved warnings
-            StringBuilder messages = new StringBuilder();
-            if (!diagnostics.isEmpty())
-                messages.append(String.join("\n", diagnostics));
-
-            var unresolved = result.getUnresolvedDependencies();
-            if (!unresolved.isEmpty())
-            {
-                LOGGER.warn("Unresolved type dependencies (skipped): " + unresolved);
-                if (!messages.isEmpty())
-                    messages.append("\n");
-                messages.append(unresolved.size()).append(" types skipped due to unresolved dependencies.");
-            }
-
-            return messages.toString();
         }
-        finally
+
+        // Build result message with diagnostics and any unresolved warnings
+        StringBuilder messages = new StringBuilder();
+        if (!diagnostics.isEmpty())
+            messages.append(String.join("\n", diagnostics));
+
+        var unresolved = result.getUnresolvedDependencies();
+        if (!unresolved.isEmpty())
         {
-            typePool.close();
+            LOGGER.warn("Unresolved type dependencies (skipped): " + unresolved);
+            if (!messages.isEmpty())
+                messages.append("\n");
+            messages.append(unresolved.size()).append(" types skipped due to unresolved dependencies.");
         }
+        
+        commit = true;
+        return messages.toString();
+    }
+    finally
+    {
+        dtMgr.endTransaction(transaction, commit);
+        typePool.close();
     }
 }
